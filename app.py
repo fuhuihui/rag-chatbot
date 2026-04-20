@@ -1,60 +1,38 @@
 import streamlit as st
 import os
-from typing import List
-from sentence_transformers import SentenceTransformer, CrossEncoder
 import chromadb
 from dotenv import load_dotenv
 import requests
 
-# 国内模型下载加速
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-
+# 页面配置
 st.set_page_config(page_title="RAG知识库", page_icon="🤖")
 st.title("🤖 RAG智能知识库聊天机器人")
 
-@st.cache_resource
-def load_models():
-    load_dotenv()
-    embedding_model = SentenceTransformer("shibing624/text2vec-base-chinese")
-    cross_encoder = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
-    return embedding_model, cross_encoder
+# 加载API Key
+load_dotenv()
 
-embedding_model, cross_encoder = load_models()
-
+# 初始化向量库（使用chromadb自带的嵌入模型，不依赖sentence-transformers）
 client = chromadb.EphemeralClient()
 coll = client.get_or_create_collection(name="rag_db")
 
-def split_into_chunks(doc_file):
+# 1. 把文档分块并存入向量库
+def build_db(file_path):
     try:
-        with open(doc_file, "r", encoding="utf-8") as f:
-            return [c for c in f.read().split("\n\n") if c.strip()]
-    except:
-        return []
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        chunks = [c.strip() for c in content.split("\n\n") if c.strip()]
+        if not chunks:
+            return
+        coll.add(documents=chunks, ids=[str(i) for i in range(len(chunks))])
+    except Exception as e:
+        st.error(f"加载文档失败：{str(e)}")
 
-def embed(chunk):
-    return embedding_model.encode(chunk, normalize_embeddings=True).tolist()
+# 2. 向量检索
+def retrieve(query, top=3):
+    results = coll.query(query_texts=[query], n_results=top)
+    return results["documents"][0] if results["documents"] else []
 
-def build_db(file):
-    chunks = split_into_chunks(file)
-    if not chunks:
-        return
-    embeddings = [embed(c) for c in chunks]
-    for i, (c, e) in enumerate(zip(chunks, embeddings)):
-        coll.add(documents=[c], embeddings=[e], ids=[str(i)])
-
-def retrieve(query, top=5):
-    q_emb = embed(query)
-    res = coll.query(query_embeddings=[q_emb], n_results=top)
-    return res["documents"][0] if res["documents"] else []
-
-def rerank(query, chunks, top=3):
-    if not chunks:
-        return []
-    pairs = [(query, c) for c in chunks]
-    scores = cross_encoder.predict(pairs)
-    scored = sorted(zip(chunks, scores), key=lambda x: x[1], reverse=True)
-    return [c for c, s in scored][:top]
-
+# 3. 调用豆包API
 def doubao_answer(query, chunks):
     api_key = os.getenv("DOUBAO_API_KEY")
     url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
@@ -89,11 +67,13 @@ def doubao_answer(query, chunks):
     except Exception as e:
         return f"调用出错：{str(e)}"
 
+# 初始化知识库
 if "db_ready" not in st.session_state:
     with st.spinner("正在加载知识库..."):
         build_db("代码交接.md")
         st.session_state.db_ready = True
 
+# 聊天界面
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -108,10 +88,9 @@ if user_input:
         st.markdown(user_input)
 
     with st.spinner("思考中..."):
-        retrieved = retrieve(user_input)
-        reranked = rerank(user_input, retrieved)
-        ans = doubao_answer(user_input, reranked)
+        retrieved_chunks = retrieve(user_input)
+        answer = doubao_answer(user_input, retrieved_chunks)
 
     with st.chat_message("assistant"):
-        st.markdown(ans)
-    st.session_state.messages.append({"role": "assistant", "content": ans})
+        st.markdown(answer)
+    st.session_state.messages.append({"role": "assistant", "content": answer})
