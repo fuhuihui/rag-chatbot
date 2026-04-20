@@ -1,5 +1,6 @@
 streamlit
 sentence-transformers
-chromadb
+chromadb==0.4.18
 python-dotenv
 google-genai
+protobuf==4.25.3
